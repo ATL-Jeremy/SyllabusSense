@@ -1,0 +1,22 @@
+
+# API keys and private settings
+.streamlit/secrets.toml
+.env
+.env.*
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python temporary files
+__pycache__/
+*.pyc
+
+# Local student database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Uploaded documents
+uploads/
