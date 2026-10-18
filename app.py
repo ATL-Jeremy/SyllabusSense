@@ -1,8 +1,9 @@
 from pypdf import PdfReader
 import streamlit as st 
-from datetime import date
+from datetime import date, timedelta
 import re
 import hashlib
+import pandas as pd
 from ai_analysis import analyze_syllabus, MAX_CHARACTERS
 from database import (
     create_database,
@@ -32,87 +33,65 @@ st.set_page_config(
 # ---------- DESIGN ----------
 st.markdown("""
 <style>
-/* Consistent readable text on the light dashboard (including AI findings) */
-[data-testid="stMarkdownContainer"] { color: #17365D; }
-[data-testid="stMarkdownContainer"] p,
+/* Visual styling only: all data remains in the existing SQLite database. */
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+    background: #F4F7FC !important;
+    color: #17365D !important;
+}
+[data-testid="stHeader"] { background: #F4F7FC !important; }
+.block-container { max-width: 1160px; padding-top: 2rem; padding-bottom: 4rem; }
+h1, h2, h3, h4, [data-testid="stMarkdownContainer"] p,
 [data-testid="stMarkdownContainer"] li,
-[data-testid="stMarkdownContainer"] h4 { color: #17365D; }
-.hero h2, .hero p { color: #FFFFFF !important; }
-/* Make labels and captions readable */
-
-[data-testid="stWidgetLabel"] p {
-    color: #17365D !important;
+[data-testid="stWidgetLabel"] p,
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+    color: #17365D;
 }
-
-[data-testid="stCaptionContainer"] {
-    color: #365578 !important;
-}
-
-[data-testid="stCaptionContainer"] p {
-    color: #365578 !important;
-}
-/* Force metric card backgrounds */
-
-div[data-testid="stMarkdownContainer"] div[style*="background-color"] {
-    background-image: none !important;
-}
-
-div[style*="background-color: #E0ECFF"] {
-    background-color: #E0ECFF !important;
-}
-
-div[style*="background-color: #DDF7E8"] {
-    background-color: #DDF7E8 !important;
-}
-
-div[style*="background-color: #FFF0D9"] {
-    background-color: #FFF0D9 !important;
-}
-html, body, .stApp,
-[data-testid="stAppViewContainer"],
-[data-testid="stMain"] {
-    background-color: #F1F5FB !important;
-}
-
-[data-testid="stHeader"] {
-    background-color: #F1F5FB !important;
-}
-
-.block-container {
-    padding-top: 2rem;
-    max-width: 1200px;
-}
-
-h1, h2, h3 {
-    color: #17365D !important;
-}
-
-.hero {
-    background: linear-gradient(120deg, #17365D, #3267A8);
-    padding: 24px;
-    border-radius: 18px;
-    margin-bottom: 20px;
-}
-
-.hero h2, .hero p {
-    color: white !important;
-}
-
-
-div[data-testid="stMetric"] {
-    background: #E5EEFF !important;
-    border: 1px solid #C8D9F5;
+[data-testid="stCaptionContainer"] p { color: #56708C !important; }
+.hero { background: linear-gradient(120deg,#142F56,#2B64A6);
+        padding: 30px 32px; border-radius: 20px; margin-bottom: 18px;
+        box-shadow: 0 10px 30px rgba(20,47,86,.10); }
+.hero h2, .hero p { color:#FFFFFF !important; margin:0; }
+.hero h2 { font-size: 1.65rem; }
+.hero p { margin-top: 10px; opacity: .90; }
+[data-testid="stVerticalBlockBorderWrapper"] > div[style*="border"] {
     border-radius: 16px;
-    padding: 20px;
 }
-
-div[data-testid="stMetricLabel"] {
-    color: #365578 !important;
+[data-testid="stForm"], [data-testid="stExpander"] {
+    border-radius: 16px !important;
 }
-
-div[data-testid="stMetricValue"] {
-    color: #17365D !important;
+[data-testid="stTextInput"] input, [data-testid="stDateInput"] input,
+[data-testid="stSelectbox"] > div > div, [data-testid="stTextArea"] textarea {
+    background-color:#FFFFFF !important; color:#17365D !important;
+    border-color:#CCD8E8 !important;
 }
+/* Streamlit's table uses a canvas/grid implementation: the theme controls its colors. */
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+    background: #FFFFFF; border-radius: 12px; overflow: hidden;
+}
+.stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] {
+    border-radius: 10px; font-weight: 600;
+}
+hr { border-color:#DDE5F0 !important; }
+/* Consistent contrast for Streamlit inputs, buttons, hints, and table. */
+[data-testid="stTextInput"] input::placeholder,
+[data-testid="stTextArea"] textarea::placeholder {color:#667B96 !important; opacity:1 !important;}
+[data-testid="stDateInput"] input {background:#FFFFFF !important; color:#17365D !important;}
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stSelectbox"] [data-baseweb="select"] input {
+  background:#FFFFFF !important; color:#17365D !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] span { color:#17365D !important; }
+.stButton button, [data-testid="stFormSubmitButton"] button {
+  background-color:#FFFFFF !important; color:#17365D !important;
+  border:1px solid #B6C9E3 !important; border-radius:10px !important;
+}
+.stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] {
+  background-color:#245C9A !important; color:#FFFFFF !important;
+  border-color:#245C9A !important;
+}
+.stButton button p, [data-testid="stFormSubmitButton"] button p {color:inherit !important;}
+[data-testid="stFileUploader"] button { color:#17365D !important; background:#FFFFFF !important; }
+[data-testid="stDataEditor"] {border:1px solid #DCE5F0;}
 
 </style>
 """, unsafe_allow_html=True)
@@ -141,12 +120,12 @@ tasks = load_tasks()
 # ---------- HEADER ----------
 st.markdown("""
 <div class="hero">
-    <h2>Study smarter, not harder. 🎓</h2>
-    <p>Your semester, organized in one place.</p>
+    <h2>Your semester, under control. 🎓</h2>
+    <p>Upload a syllabus, capture the deadlines, and plan with confidence.</p>
 </div>
 """, unsafe_allow_html=True)
 
-st.title("Your dashboard")
+st.title("Overview")
 st.caption(f"Today · {date.today().strftime('%A, %B %d')}")
 
 # ---------- METRICS ----------
@@ -219,107 +198,128 @@ with col3:
 
 st.divider()
 
-# ---------- ADD TASK ----------
-st.subheader("➕ Add an assignment")
-
-with st.form("add_task_form", clear_on_submit=True):
-    task_name = st.text_input(
-        "Assignment name",
-        placeholder="e.g. Psychology Chapter 6 quiz"
-    )
-
-    course = st.text_input(
-        "Course",
-        placeholder="e.g. Psychology"
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        due_date = st.date_input("Due date", value=date.today())
-
-    with col2:
-        priority = st.selectbox(
-            "Priority",
-            ["High", "Medium", "Low"]
-        )
-
-    submitted = st.form_submit_button(
-        "Add assignment",
-        use_container_width=True
-    )
-
-if submitted:
-    if not task_name.strip():
-        st.error("Please enter an assignment name.")
-    elif not course.strip():
-        st.error("Please enter a course name.")
-    else:
-        add_assignment(
-            task_name.strip(),
-            course.strip(),
-            due_date.isoformat(),
-            priority,
-        )
-
-        st.success("Assignment added!")
-        st.rerun()
+# ---------- UPCOMING DEADLINES ----------
+st.subheader("Upcoming deadlines")
+upcoming = sorted(
+    (task for task in tasks if not task["completed"] and task["due"] >= date.today()),
+    key=lambda t: (t["due"], {"High": 0, "Medium": 1, "Low": 2}.get(t["priority"], 3)),
+)[:5]
+if upcoming:
+    for task in upcoming:
+        days_left = (task["due"] - date.today()).days
+        when = "Due today" if days_left == 0 else "Due tomorrow" if days_left == 1 else f"In {days_left} days"
+        left, right = st.columns([4, 1])
+        with left:
+            st.markdown(f"**{task['name']}**")
+            st.caption(f"{task['course']} · {task['due'].strftime('%b %d, %Y')} · {task['priority']} priority")
+        with right:
+            st.markdown(f"**{when}**")
+else:
+    st.info("No upcoming unfinished deadlines. Add an assignment or upload a syllabus to get started.")
 
 st.divider()
 
-# ---------- TASK LIST ----------
-st.subheader("📚 Your assignments")
+# ---------- COMPACT ASSIGNMENTS ----------
+st.subheader("Your assignments")
+st.caption("Filter by course and check Completed to update saved work.")
+if tasks:
+    courses = sorted({task["course"] for task in tasks}, key=str.casefold)
+    filter_left, filter_right = st.columns([2, 1])
+    with filter_left:
+        chosen_course = st.selectbox("Course", ["All courses", *courses], key="assignment_course_filter")
+    with filter_right:
+        chosen_status = st.selectbox("Status", ["All", "Remaining", "Completed", "Overdue"], key="assignment_status_filter")
 
-if not tasks:
-    st.info("No assignments yet. Add your first assignment above!")
-else:
-    sort_order = {"High": 0, "Medium": 1, "Low": 2}
+    def shown(task):
+        if chosen_course != "All courses" and task["course"] != chosen_course:
+            return False
+        if chosen_status == "Completed" and not task["completed"]:
+            return False
+        if chosen_status == "Remaining" and task["completed"]:
+            return False
+        if chosen_status == "Overdue" and (task["completed"] or task["due"] >= date.today()):
+            return False
+        return True
 
-    ordered_tasks = sorted(
-        enumerate(tasks),
-        key=lambda item: (
-            item[1]["completed"],
-            item[1]["due"],
-            sort_order[item[1]["priority"]],
-        )
+    visible_tasks = sorted(
+        (task for task in tasks if shown(task)),
+        key=lambda t: (t["completed"], t["due"], {"High": 0, "Medium": 1, "Low": 2}.get(t["priority"], 3)),
     )
+    if visible_tasks:
+        rows = [
+            {
+                "ID": task["id"],
+                "Completed": task["completed"],
+                "Assignment": task["name"],
+                "Course": task["course"],
+                "Due date": task["due"].isoformat(),
+                "Priority": task["priority"],
+                "Weight (%)": task["weight"],
+                "Status": "Completed" if task["completed"] else "Overdue" if task["due"] < date.today() else "Upcoming",
+            }
+            for task in visible_tasks
+        ]
+        edited_tasks = st.data_editor(
+            pd.DataFrame(rows),
+            key=f"task_grid_{chosen_course}_{chosen_status}",
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            disabled=["ID", "Assignment", "Course", "Due date", "Priority", "Weight (%)", "Status"],
+            column_order=["Completed", "Assignment", "Course", "Due date", "Priority", "Weight (%)", "Status"],
+            column_config={
+                "Completed": st.column_config.CheckboxColumn("Done", help="Mark assignment complete"),
+                "Assignment": st.column_config.TextColumn("Assignment", width="large"),
+                "Course": st.column_config.TextColumn("Course", width="medium"),
+                "Due date": st.column_config.TextColumn("Due date"),
+                "Weight (%)": st.column_config.NumberColumn("Weight (%)", format="%.1f"),
+            },
+        )
+        original_by_id = {task["id"]: task for task in visible_tasks}
 
-    for original_index, task in ordered_tasks:
-        with st.container(border=True):
-            left, right = st.columns([4, 1])
+    changes_made = False
 
-            with left:
-                st.markdown(f"**{task['name']}**")
-                st.caption(
-                    f"{task['course']} · Due {task['due'].strftime('%b %d, %Y')}"
-                    + (f" · Worth {task['weight']:g}%" if task["weight"] is not None else "")
-                )
+    for row in edited_tasks.to_dict("records"):
+        original = original_by_id[int(row["ID"])]
 
-                if task["completed"]:
-                    st.success("Completed")
-                elif task["due"] < date.today():
-                    st.error(f"Overdue · {task['priority']} priority")
-                else:
-                    st.caption(f"{task['priority']} priority")
+        new_status = bool(row["Completed"])
+        old_status = bool(original["completed"])
 
-            with right:
-                is_done = st.checkbox(
-                    "Completed",
-                    value=task["completed"],
-                    key=f"completed_{task['id']}",
-                )
+        if new_status != old_status:
+            update_assignment_status(original["id"], new_status)
+            changes_made = True
 
-                
-                if is_done != task["completed"]:
-                    update_assignment_status(
-                        task["id"],
-                        is_done
-                    )
-                    st.rerun()
+    if changes_made:
+        st.rerun()
+        st.caption(f"Showing {len(visible_tasks)} of {len(tasks)} saved assignments. Blank weights mean not provided.")
+    else:
+        st.info("No assignments match these filters.")
+else:
+    st.info("No assignments saved yet.")
+
+with st.expander("+ Add an assignment manually"):
+    with st.form("add_task_form", clear_on_submit=True):
+        task_name = st.text_input("Assignment name", placeholder="e.g. Psychology Chapter 6 quiz")
+        course = st.text_input("Course", placeholder="e.g. Psychology")
+        left, right = st.columns(2)
+        with left:
+            due_date = st.date_input("Due date", value=date.today())
+        with right:
+            priority = st.selectbox("Priority", ["High", "Medium", "Low"])
+        submitted = st.form_submit_button("Add assignment", type="primary", use_container_width=True)
+    if submitted:
+        if not task_name.strip():
+            st.error("Please enter an assignment name.")
+        elif not course.strip():
+            st.error("Please enter a course name.")
+        else:
+            add_assignment(task_name.strip(), course.strip(), due_date.isoformat(), priority)
+            st.success("Assignment added!")
+            st.rerun()
 
 # ---------- SYLLABUS UPLOAD + AI REVIEW ----------
 st.divider()
-st.subheader("📄 Upload your syllabus")
+st.subheader("Upload a syllabus")
 st.write("Upload a PDF, extract its text, then use Gemini to identify academic deadlines. Review everything before saving.")
 
 uploaded_file = st.file_uploader("Choose a PDF syllabus", type=["pdf"])
@@ -366,8 +366,18 @@ if uploaded_file is not None:
     if st.session_state.get("analyzed_file_id") == file_id and st.session_state.get("ai_result"):
         result = st.session_state.ai_result
         st.subheader("Course overview")
-        st.markdown(f"**Course:** {result['course'] or 'Not identified'}")
-        st.markdown(f"**Instructor:** {result['instructor'] or 'Not identified'}")
+        st.caption("AI can miss course details. Correct these before saving assignments.")
+        meta_left, meta_right = st.columns(2)
+        with meta_left:
+            reviewed_course = st.text_input(
+                "Course name", value=result["course"] or "",
+                key=f"meta_course_{file_id}",
+            )
+        with meta_right:
+            reviewed_instructor = st.text_input(
+                "Instructor (optional)", value=result["instructor"] or "",
+                key=f"meta_instructor_{file_id}",
+            )
         if result["grading_notes"]:
             st.markdown("**Grading breakdown (as described in the syllabus)**")
             st.info(result["grading_notes"])
@@ -380,14 +390,19 @@ if uploaded_file is not None:
         if not items:
             st.info("No specific assessments were identified. Check the original PDF.")
         else:
-            for item in items:
-                weight_label = f" — {item['weight']}" if item["weight"] else ""
-                st.markdown(f"**{item['name']}**{weight_label}")
-                if item["due_date"] is None:
-                    st.caption("Date not provided · Not yet in your assignment dashboard")
-                else:
-                    st.caption(f"Due {item['due_date'].strftime('%b %d, %Y')} · Confirm against the PDF")
-            st.caption("Weights above are AI-extracted, not independently verified. Multiple assessments grouped under one heading remain grouped unless individually documented.")
+            st.caption(
+                "The table below contains the detailed assessments and dates. "
+                "Confirm each entry against your syllabus before saving."
+            )
+            with st.expander("View extracted assessment summary"):
+                for item in items:
+                    weight_label = f" — {item['weight']}" if item["weight"] else ""
+                    st.markdown(f"**{item['name']}**{weight_label}")
+                    if item["due_date"] is None:
+                        st.caption("Date not provided")
+                    else:
+                        st.caption(f"Due {item['due_date'].strftime('%b %d, %Y')}")
+            st.caption("Grouped assessments remain grouped until the syllabus provides separate details.")
 
         st.divider()
         st.subheader("Assignment planner — review before saving")
@@ -414,10 +429,7 @@ if uploaded_file is not None:
                 ]
 
             with st.form(f"compact_review_{file_id}"):
-                course_name = st.text_input(
-                    "Course for saved assignments", value=result["course"] or "",
-                    key=f"review_course_{file_id}",
-                )
+                course_name = reviewed_course
                 edited = st.data_editor(
                     st.session_state[review_key],
                     use_container_width=True,
@@ -432,13 +444,14 @@ if uploaded_file is not None:
                     },
                     key=f"assessment_editor_{file_id}",
                 )
-                with st.expander("View AI evidence for each row"):
-                    for item in items:
-                        st.markdown(f"**{item['name']}**")
-                        st.caption(f"Type: {item['kind']} · Reported weight: {item['weight'] or 'Not provided'}")
-                        if item["source_evidence"]:
-                            st.caption(f"Source excerpt: {item['source_evidence']}")
                 save = st.form_submit_button("Save verified assignments", type="primary")
+
+            with st.expander("View AI evidence for each assessment"):
+                for item in items:
+                    st.markdown(f"**{item['name']}**")
+                    st.caption(f"Type: {item['kind']} · Reported weight: {item['weight'] or 'Not provided'}")
+                    if item["source_evidence"]:
+                        st.caption(f"Source excerpt: {item['source_evidence']}")
 
             if save:
                 selected = edited.to_dict("records") if hasattr(edited, "to_dict") else edited
