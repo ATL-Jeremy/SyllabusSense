@@ -1,6 +1,7 @@
 from pypdf import PdfReader
 import streamlit as st 
 from datetime import date
+import re
 import hashlib
 from ai_analysis import analyze_syllabus, MAX_CHARACTERS
 from database import (
@@ -9,6 +10,16 @@ from database import (
     get_assignments,
     update_assignment_status,
 )
+
+def parse_weight(raw):
+    """Convert '10%' or '45% (15% each)' to a numeric total weight.
+
+    Grouped items retain their *total* weight until the student splits them.
+    Unknown weights stay NULL rather than pretending to be zero.
+    """
+    match = re.search(r"(?<!\d)(\d+(?:\.\d+)?)\s*%", str(raw or ""))
+    return float(match.group(1)) if match else None
+
 
 create_database()
 
@@ -119,6 +130,7 @@ def load_tasks():
             "due": date.fromisoformat(row[3]),
             "priority": row[4],
             "completed": bool(row[5]),
+            "weight": row[6],
         }
         for row in rows
     ]
@@ -280,6 +292,7 @@ else:
                 st.markdown(f"**{task['name']}**")
                 st.caption(
                     f"{task['course']} · Due {task['due'].strftime('%b %d, %Y')}"
+                    + (f" · Worth {task['weight']:g}%" if task["weight"] is not None else "")
                 )
 
                 if task["completed"]:
@@ -378,91 +391,100 @@ if uploaded_file is not None:
 
         st.divider()
         st.subheader("Assignment planner — review before saving")
-        st.caption("AI suggestions are not automatically saved. Confirm every deadline against the syllabus or your instructor before adding it to the dashboard.")
+        st.caption("One row per extracted assessment. Correct any errors before saving. Undated items are NOT saved by default.")
         left_count, right_count = st.columns(2)
         left_count.metric("Dated assessments", len(dated_items))
         right_count.metric("Awaiting dates", len(undated_items))
-
-        if not dated_items:
-            st.info("No confirmed calendar dates were found. That's OK — the syllabus may contain only grading information.")
         if undated_items:
-            st.warning("Items without dates are shown below for reference. A missing date will never be replaced with today's date or saved by accident.")
+            st.info("Missing dates remain blank. Enter a verified date to include an undated assessment in your dashboard.")
 
         if items:
-            with st.form(f"review_syllabus_{file_id}"):
+            # Stable review rows while the student edits the table.
+            review_key = f"review_data_{file_id}"
+            if review_key not in st.session_state:
+                st.session_state[review_key] = [
+                    {
+                        "Save": item["due_date"] is not None,
+                        "Assessment": item["name"],
+                        "Due date (YYYY-MM-DD)": item["due_date"].isoformat() if item["due_date"] else "",
+                        "Priority": "Medium",
+                        "Weight (%)": parse_weight(item["weight"]),
+                    }
+                    for item in items
+                ]
+
+            with st.form(f"compact_review_{file_id}"):
                 course_name = st.text_input(
-                    "Course for saved assignments",
-                    value=result["course"] or "",
+                    "Course for saved assignments", value=result["course"] or "",
                     key=f"review_course_{file_id}",
                 )
-                reviewed = []
-                for i, item in enumerate(items):
-                    is_dated = item["due_date"] is not None
-                    heading = f"{item['name']} · {item['due_date'].strftime('%b %d, %Y')}" if is_dated else f"{item['name']} · Date not provided"
-                    with st.expander(heading, expanded=is_dated):
-                        include = st.checkbox(
-                            "Add this assessment to my dashboard",
-                            value=is_dated,
-                            key=f"include_{file_id}_{i}",
-                        )
-                        name = st.text_input(
-                            "Assignment name",
-                            value=item["name"],
-                            key=f"name_{file_id}_{i}",
-                        )
-                        has_date = st.checkbox(
-                            "I have verified a due date for this assessment",
-                            value=is_dated,
-                            key=f"hasdate_{file_id}_{i}",
-                        )
-                        due = None
-                        if has_date:
-                            due = st.date_input(
-                                "Verified due date",
-                                value=item["due_date"] or date.today(),
-                                key=f"due_{file_id}_{i}",
-                            )
-                            if not is_dated:
-                                st.caption("The date picker starts at today only for convenience. Enter the actual deadline before saving.")
-                        else:
-                            st.caption("Date not provided — this item cannot be saved until a date is confirmed.")
-                        priority = st.selectbox(
-                            "Priority", ["High", "Medium", "Low"], index=1,
-                            key=f"priority_{file_id}_{i}",
-                        )
-                        if item["weight"]:
-                            st.caption(f"Grading weight: {item['weight']}")
+                edited = st.data_editor(
+                    st.session_state[review_key],
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="fixed",
+                    column_config={
+                        "Save": st.column_config.CheckboxColumn("Save", help="Include in dashboard"),
+                        "Assessment": st.column_config.TextColumn("Assessment", required=True, width="large"),
+                        "Due date (YYYY-MM-DD)": st.column_config.TextColumn("Verified due date", help="Use YYYY-MM-DD; leave blank if unknown"),
+                        "Priority": st.column_config.SelectboxColumn("Priority", options=["High", "Medium", "Low"], required=True),
+                        "Weight (%)": st.column_config.NumberColumn("Weight (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"),
+                    },
+                    key=f"assessment_editor_{file_id}",
+                )
+                with st.expander("View AI evidence for each row"):
+                    for item in items:
+                        st.markdown(f"**{item['name']}**")
+                        st.caption(f"Type: {item['kind']} · Reported weight: {item['weight'] or 'Not provided'}")
                         if item["source_evidence"]:
                             st.caption(f"Source excerpt: {item['source_evidence']}")
-                        reviewed.append((include, name.strip(), due, priority, has_date))
-
                 save = st.form_submit_button("Save verified assignments", type="primary")
 
             if save:
+                selected = edited.to_dict("records") if hasattr(edited, "to_dict") else edited
+                errors = []
+                validated = []
                 if not course_name.strip():
-                    st.error("Please enter a course name before saving.")
+                    errors.append("Enter a course name.")
+                for row_number, row in enumerate(selected, start=1):
+                    if not row["Save"]:
+                        continue
+                    name = str(row["Assessment"] or "").strip()
+                    raw_date = str(row["Due date (YYYY-MM-DD)"] or "").strip()
+                    if not name:
+                        errors.append(f"Row {row_number}: assessment name is missing.")
+                    try:
+                        due = date.fromisoformat(raw_date)
+                    except ValueError:
+                        errors.append(f"Row {row_number}: enter a real due date as YYYY-MM-DD, or uncheck Save.")
+                        continue
+                    weight = row["Weight (%)"]
+                    if weight is not None and not 0 <= float(weight) <= 100:
+                        errors.append(f"Row {row_number}: grading weight must be between 0 and 100.")
+                    if name:
+                        validated.append((name, due.isoformat(), row["Priority"], float(weight) if weight is not None else None))
+
+                if errors:
+                    for message in errors:
+                        st.error(message)
+                    st.warning("Nothing was saved. Fix the listed rows and try again.")
                 else:
                     existing = {
                         (t["name"].casefold(), t["course"].casefold(), t["due"].isoformat())
                         for t in load_tasks()
                     }
-                    saved = skipped = 0
-                    for include, name, due, priority, has_date in reviewed:
-                        if not include:
-                            continue
-                        if not name or not has_date or due is None:
-                            skipped += 1
-                            continue
-                        identity = (name.casefold(), course_name.strip().casefold(), due.isoformat())
+                    saved = duplicates = 0
+                    for name, due, priority, weight in validated:
+                        identity = (name.casefold(), course_name.strip().casefold(), due)
                         if identity in existing:
-                            skipped += 1
+                            duplicates += 1
                             continue
-                        add_assignment(name, course_name.strip(), due.isoformat(), priority)
+                        add_assignment(name, course_name.strip(), due, priority, weight)
                         existing.add(identity)
                         saved += 1
-                    st.success(f"Saved {saved} verified assignment(s). Skipped {skipped} incomplete or duplicate item(s).")
+                    st.success(f"Saved {saved} assignment(s); skipped {duplicates} duplicate(s).")
                     if saved:
-                        st.info("Assignments were added to SQLite. Refresh the dashboard to see the updated counts.")
+                        st.info("Scroll to Your assignments to view saved items, or refresh the app.")
 
 st.divider()
 st.caption("SyllabusSense · Your personal study planner")

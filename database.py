@@ -1,72 +1,51 @@
-
+"""SyllabusSense SQLite persistence. Existing records are preserved on migration."""
 import sqlite3
+from pathlib import Path
 
-DB_NAME = "syllabussense.db"
+DB_NAME = Path(__file__).resolve().parent / "syllabussense.db"
 
 
 def create_database():
-    connection = sqlite3.connect(DB_NAME)
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS assignments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            course TEXT NOT NULL,
-            due_date TEXT NOT NULL,
-            priority TEXT NOT NULL,
-            completed INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-
-    connection.commit()
-    connection.close()
+    with sqlite3.connect(DB_NAME) as connection:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS assignments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                course TEXT NOT NULL,
+                due_date TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(assignments)")}
+        if "grading_weight" not in columns:
+            connection.execute("ALTER TABLE assignments ADD COLUMN grading_weight REAL")
 
 
-def add_assignment(name, course, due_date, priority):
-    connection = sqlite3.connect(DB_NAME)
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        INSERT INTO assignments
-        (name, course, due_date, priority, completed)
-        VALUES (?, ?, ?, ?, 0)
-    """, (name, course, due_date, priority))
-
-    connection.commit()
-    connection.close()
+def add_assignment(name, course, due_date, priority, grading_weight=None):
+    if grading_weight is not None and not 0 <= grading_weight <= 100:
+        raise ValueError("Grading weight must be between 0 and 100.")
+    with sqlite3.connect(DB_NAME) as connection:
+        connection.execute("""
+            INSERT INTO assignments (name, course, due_date, priority, completed, grading_weight)
+            VALUES (?, ?, ?, ?, 0, ?)
+        """, (name, course, due_date, priority, grading_weight))
 
 
 def get_assignments():
-    connection = sqlite3.connect(DB_NAME)
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT id, name, course, due_date,
-               priority, completed
-        FROM assignments
-        ORDER BY id
-    """)
-
-    rows = cursor.fetchall()
-    connection.close()
-
-    return rows
+    with sqlite3.connect(DB_NAME) as connection:
+        return connection.execute("""
+            SELECT id, name, course, due_date, priority, completed, grading_weight
+            FROM assignments ORDER BY id
+        """).fetchall()
 
 
 def update_assignment_status(assignment_id, completed):
-    connection = sqlite3.connect(DB_NAME)
-    cursor = connection.cursor()
+    with sqlite3.connect(DB_NAME) as connection:
+        connection.execute("UPDATE assignments SET completed = ? WHERE id = ?",
+                           (int(completed), assignment_id))
 
-    cursor.execute("""
-        UPDATE assignments
-        SET completed = ?
-        WHERE id = ?
-    """, (int(completed), assignment_id))
-
-    connection.commit()
-    connection.close()
 
 if __name__ == "__main__":
     create_database()
-    print("SyllabusSense database created successfully!")
+    print("SyllabusSense database ready — existing assignments preserved.")
