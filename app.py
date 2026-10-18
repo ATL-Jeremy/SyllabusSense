@@ -3,6 +3,7 @@ import streamlit as st
 from datetime import date, timedelta
 import re
 import hashlib
+import html
 import pandas as pd
 from ai_analysis import analyze_syllabus, MAX_CHARACTERS
 from database import (
@@ -10,6 +11,7 @@ from database import (
     add_assignment,
     get_assignments,
     update_assignment_status,
+    update_study_details,
 )
 
 def parse_weight(raw):
@@ -110,6 +112,8 @@ def load_tasks():
             "priority": row[4],
             "completed": bool(row[5]),
             "weight": row[6],
+            "hours": row[7],
+            "confidence": row[8],
         }
         for row in rows
     ]
@@ -219,15 +223,20 @@ else:
 
 st.divider()
 
-# ---------- COMPACT ASSIGNMENTS ----------
+# ---------- ASSIGNMENT CARDS ----------
 st.subheader("Your assignments")
-st.caption("Filter by course and check Completed to update saved work.")
+st.caption("Mark tasks complete, filter courses, and see what needs attention.")
+
+# Every checkbox uses the assignment ID. Updating one checkbox updates only that record.
+def change_completed(assignment_id, checkbox_key):
+    update_assignment_status(assignment_id, st.session_state[checkbox_key])
+
 if tasks:
     courses = sorted({task["course"] for task in tasks}, key=str.casefold)
-    filter_left, filter_right = st.columns([2, 1])
-    with filter_left:
+    c1, c2 = st.columns([2, 1])
+    with c1:
         chosen_course = st.selectbox("Course", ["All courses", *courses], key="assignment_course_filter")
-    with filter_right:
+    with c2:
         chosen_status = st.selectbox("Status", ["All", "Remaining", "Completed", "Overdue"], key="assignment_status_filter")
 
     def shown(task):
@@ -246,56 +255,110 @@ if tasks:
         key=lambda t: (t["completed"], t["due"], {"High": 0, "Medium": 1, "Low": 2}.get(t["priority"], 3)),
     )
     if visible_tasks:
-        rows = [
-            {
-                "ID": task["id"],
-                "Completed": task["completed"],
-                "Assignment": task["name"],
-                "Course": task["course"],
-                "Due date": task["due"].isoformat(),
-                "Priority": task["priority"],
-                "Weight (%)": task["weight"],
-                "Status": "Completed" if task["completed"] else "Overdue" if task["due"] < date.today() else "Upcoming",
-            }
-            for task in visible_tasks
-        ]
-        edited_tasks = st.data_editor(
-            pd.DataFrame(rows),
-            key=f"task_grid_{chosen_course}_{chosen_status}",
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            disabled=["ID", "Assignment", "Course", "Due date", "Priority", "Weight (%)", "Status"],
-            column_order=["Completed", "Assignment", "Course", "Due date", "Priority", "Weight (%)", "Status"],
-            column_config={
-                "Completed": st.column_config.CheckboxColumn("Done", help="Mark assignment complete"),
-                "Assignment": st.column_config.TextColumn("Assignment", width="large"),
-                "Course": st.column_config.TextColumn("Course", width="medium"),
-                "Due date": st.column_config.TextColumn("Due date"),
-                "Weight (%)": st.column_config.NumberColumn("Weight (%)", format="%.1f"),
-            },
-        )
-        original_by_id = {task["id"]: task for task in visible_tasks}
-
-    changes_made = False
-
-    for row in edited_tasks.to_dict("records"):
-        original = original_by_id[int(row["ID"])]
-
-        new_status = bool(row["Completed"])
-        old_status = bool(original["completed"])
-
-        if new_status != old_status:
-            update_assignment_status(original["id"], new_status)
-            changes_made = True
-
-    if changes_made:
-        st.rerun()
-        st.caption(f"Showing {len(visible_tasks)} of {len(tasks)} saved assignments. Blank weights mean not provided.")
+        for task in visible_tasks:
+            due_days = (task["due"] - date.today()).days
+            status = "Completed" if task["completed"] else "Overdue" if due_days < 0 else "Due today" if due_days == 0 else "Upcoming"
+            weight_label = f"{task['weight']:g}% of grade" if task["weight"] is not None else "Weight unknown"
+            with st.container(border=True):
+                tick, description, detail = st.columns([0.6, 5, 2.1], vertical_alignment="center")
+                with tick:
+                    # State for each task is independent; callbacks avoid bulk edits.
+                    key = f"completed_task_{task['id']}"
+                    st.checkbox("Done", value=task["completed"], key=key,
+                                on_change=change_completed, args=(task["id"], key),
+                                label_visibility="collapsed")
+                with description:
+                    st.markdown(f"**{html.escape(task['name'])}**")
+                    st.caption(f"{task['course']} · {task['priority']} priority · {weight_label}")
+                with detail:
+                    st.markdown(f"**{task['due'].strftime('%b %d, %Y')}**")
+                    st.caption(status)
+        st.caption(f"Showing {len(visible_tasks)} of {len(tasks)} saved assignments.")
     else:
         st.info("No assignments match these filters.")
 else:
     st.info("No assignments saved yet.")
+
+# ---------- SMART STUDY PLANNER ----------
+st.divider()
+st.subheader("Smart Study Planner")
+st.caption("Personalized, rule-based priorities using real deadlines, grading weights and your estimates. This version does not use Gemini to generate study recommendations.")
+active = [task for task in tasks if not task["completed"]]
+
+
+def study_priority(task):
+    days = (task["due"] - date.today()).days
+    urgency = 40 if days < 0 else 38 if days == 0 else 35 if days <= 2 else 28 if days <= 7 else 18 if days <= 14 else 8
+    weight_score = min(float(task["weight"]), 40) / 40 * 25 if task["weight"] is not None else 12.5
+    confidence_score = (5 - task["confidence"]) / 4 * 20 if task["confidence"] is not None else 10
+    hours_score = min(float(task["hours"]), 10) / 10 * 10 if task["hours"] is not None else 5
+    priority_score = {"High": 5, "Medium": 3, "Low": 1}.get(task["priority"], 3)
+    return round(urgency + weight_score + confidence_score + hours_score + priority_score, 1)
+
+
+if not active:
+    st.info("No unfinished assignments. Add a task or uncheck a completed task to make a study plan.")
+else:
+    with st.expander("Personalize your study priorities", expanded=True):
+        st.write("Enter estimated study hours and confidence (1 = not confident, 5 = very confident). Leave them blank if you don't know yet.")
+        detail_rows = [{
+            "ID": task["id"], "Assignment": task["name"], "Course": task["course"],
+            "Study hours": task["hours"], "Confidence (1–5)": task["confidence"],
+        } for task in active]
+        with st.form("study_details_form"):
+            edited_details = st.data_editor(
+                pd.DataFrame(detail_rows), hide_index=True, use_container_width=True,
+                num_rows="fixed", disabled=["ID", "Assignment", "Course"],
+                column_order=["Assignment", "Course", "Study hours", "Confidence (1–5)"],
+                column_config={
+                    "Assignment": st.column_config.TextColumn(width="large"),
+                    "Study hours": st.column_config.NumberColumn(min_value=0.5, max_value=40.0, step=0.5, format="%.1f"),
+                    "Confidence (1–5)": st.column_config.NumberColumn(min_value=1, max_value=5, step=1, format="%d"),
+                },
+                key="study_inputs_editor",
+            )
+            save_details = st.form_submit_button("Save study preferences", type="primary")
+        if save_details:
+            import pandas as _pd
+            revisions = []
+            errors = []
+            for r in edited_details.to_dict("records"):
+                hrs = None if _pd.isna(r["Study hours"]) else float(r["Study hours"])
+                conf = None if _pd.isna(r["Confidence (1–5)"]) else int(r["Confidence (1–5)"])
+                if hrs is not None and not 0.5 <= hrs <= 40:
+                    errors.append(f"{r['Assignment']}: study hours must be 0.5–40")
+                if conf is not None and not 1 <= conf <= 5:
+                    errors.append(f"{r['Assignment']}: confidence must be 1–5")
+                revisions.append((int(r["ID"]), hrs, conf))
+            if errors:
+                for err in errors:
+                    st.error(err)
+            else:
+                for task_id, hrs, conf in revisions:
+                    update_study_details(task_id, hrs, conf)
+                st.success("Study preferences saved.")
+                st.rerun()
+
+    ranked = sorted(active, key=lambda t: (-study_priority(t), t["due"]))
+    st.markdown("#### What to focus on first")
+    for index, task in enumerate(ranked[:5], start=1):
+        days = (task["due"] - date.today()).days
+        timing = "overdue" if days < 0 else "due today" if days == 0 else f"due in {days} day{'s' if days != 1 else ''}"
+        with st.container(border=True):
+            left, right = st.columns([5, 1], vertical_alignment="center")
+            with left:
+                st.markdown(f"**{index}. {html.escape(task['name'])}**")
+                st.caption(f"{task['course']} · {timing} · "
+                           f"{'weight not supplied' if task['weight'] is None else str(task['weight']) + '% grade weight'} · "
+                           f"{'study hours unknown' if task['hours'] is None else str(task['hours']) + 'h estimated'} · "
+                           f"{'confidence unknown' if task['confidence'] is None else str(task['confidence']) + '/5 confidence'}")
+            with right:
+                st.metric("Priority score", f"{study_priority(task):.1f}")
+    if len(ranked) > 5:
+        st.caption(f"Showing your 5 highest-priority tasks out of {len(ranked)} unfinished tasks.")
+    with st.expander("How priorities are calculated"):
+        st.write("The score is a planning estimate (not a predicted grade): deadline urgency up to 40 points; grading weight up to 25; low confidence up to 20; estimated hours up to 10; and the manually selected priority up to 5. Unknown weight, confidence, or hours receive neutral midpoint points—not zero. Overdue work ranks urgently but should be checked against the instructor's late policy. Ties are broken by earliest deadline.")
+        st.caption("Scores update when you change estimates, mark tasks complete, or dates pass. This is an initial heuristic to test with students, not a proven optimization model.")
 
 with st.expander("+ Add an assignment manually"):
     with st.form("add_task_form", clear_on_submit=True):
