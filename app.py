@@ -12,7 +12,10 @@ from database import (
     get_assignments,
     update_assignment_status,
     update_study_details,
+    create_schedule_tables, get_availability, save_availability,
+    get_sessions, replace_unfinished_sessions, set_session_completed, move_session,
 )
+from study_schedule import generate_week
 
 def parse_weight(raw):
     """Convert '10%' or '45% (15% each)' to a numeric total weight.
@@ -25,6 +28,7 @@ def parse_weight(raw):
 
 
 create_database()
+create_schedule_tables()
 
 st.set_page_config(
     page_title="SyllabusSense",
@@ -94,6 +98,18 @@ hr { border-color:#DDE5F0 !important; }
 .stButton button p, [data-testid="stFormSubmitButton"] button p {color:inherit !important;}
 [data-testid="stFileUploader"] button { color:#17365D !important; background:#FFFFFF !important; }
 [data-testid="stDataEditor"] {border:1px solid #DCE5F0;}
+/* BaseWeb displays selectbox values in a span inside the input (not always the input itself). */
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div *,
+[data-testid="stSelectbox"] div[data-baseweb="select"] span,
+[data-testid="stSelectbox"] div[data-baseweb="select"] input {
+    color:#17365D !important;
+    -webkit-text-fill-color:#17365D !important;
+    opacity:1 !important;
+}
+[data-testid="stSelectbox"] div[data-baseweb="select"] svg { fill:#17365D !important; }
+/* Date and number-input legibility */
+[data-testid="stNumberInput"] input {color:#17365D !important; background:#FFFFFF !important;}
 
 </style>
 """, unsafe_allow_html=True)
@@ -379,6 +395,127 @@ with st.expander("+ Add an assignment manually"):
             add_assignment(task_name.strip(), course.strip(), due_date.isoformat(), priority)
             st.success("Assignment added!")
             st.rerun()
+
+# ---------- VERSION 6: WEEKLY PLAN + TODAY'S FOCUS ----------
+st.divider()
+st.subheader("Your weekly study plan")
+st.caption("Choose your available study hours, then generate a realistic seven-day plan. Study sessions are stored locally in SQLite.")
+week_start = date.today()  # Rolling seven-day planning window starting today
+week_end = week_start + timedelta(days=6)
+weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+saved_availability = get_availability()
+
+with st.expander("My availability", expanded=True):
+    st.write("How many hours can you study on each day? Enter 0 for unavailable days.")
+    with st.form("availability_v6"):
+        columns = st.columns(4)
+        availability_inputs = {}
+        for day_index in range(7):
+            day_date = week_start + timedelta(days=day_index)
+            weekday = day_date.weekday()
+            with columns[day_index % 4]:
+                availability_inputs[weekday] = st.number_input(
+                    f"{weekday_names[weekday]} · {day_date.strftime('%b %d')}",
+                    min_value=0.0, max_value=16.0, value=float(saved_availability.get(weekday, 2.0 if weekday < 5 else 1.0)),
+                    step=0.5, key=f"avail_{weekday}",
+                )
+        session_duration = st.selectbox("Preferred study block", [0.5, 1.0, 1.5, 2.0], index=1,
+                                        format_func=lambda hours: f"{int(hours * 60)} minutes", key="preferred_study_block")
+        save_avail = st.form_submit_button("Save availability", type="primary")
+    if save_avail:
+        save_availability(availability_inputs)
+        st.success("Availability saved. Click Generate / refresh plan below to apply it.")
+        st.rerun()
+
+availability = get_availability()
+if not availability:
+    st.info("Save your study availability above to get started.")
+else:
+    capacity_by_day = [availability.get((week_start + timedelta(days=i)).weekday(), 0.0) for i in range(7)]
+    current_sessions = get_sessions(week_start, week_end)
+    finished = [session for session in current_sessions if session['completed']]
+    planned, shortages, assumed_ids = generate_week(tasks, capacity_by_day, week_start, study_priority,
+                                                        session_length=session_duration, previously_completed=finished)
+    total_available = sum(capacity_by_day)
+    summary_left, summary_mid, summary_right = st.columns(3)
+    summary_left.metric("Available this week", f"{total_available:g}h")
+    summary_mid.metric("Sessions completed", len(finished))
+    summary_right.metric("Estimated hours not scheduled", f"{sum(shortages.values()):g}h")
+    if assumed_ids:
+        st.info(f"For {len(assumed_ids)} assignment(s) without estimates, the planner assumes 3 hours each. Set real estimates in Smart Study Planner for better results.")
+    if shortages:
+        st.warning("Some work cannot fit before its deadline or within your availability. The planner won't schedule past due dates or exceed daily limits.")
+        task_lookup = {t['id']: t for t in tasks}
+        for tid, hours in shortages.items():
+            st.caption(f"{task_lookup[tid]['name']}: {hours:g}h still unallocated")
+    st.caption("Unscheduled hours can include work intended for later weeks, not just time you are short this week. The calendar uses day-level estimates, not class times or submission hours. It schedules before the due date, never on it.")
+    if st.button("Generate / refresh weekly plan", type="primary"):
+        replace_unfinished_sessions(week_start, week_end, planned)
+        st.rerun()
+
+    current_sessions = get_sessions(week_start, week_end)
+    task_lookup = {t['id']: t for t in tasks}
+    valid_sessions = [s for s in current_sessions if s['assignment_id'] in task_lookup]
+    st.markdown("#### Weekly calendar")
+    grid = st.columns(7)
+    for offset, column in enumerate(grid):
+        day = week_start + timedelta(days=offset)
+        day_sessions = [s for s in valid_sessions if s['day'] == day]
+        count_done = sum(bool(s['completed']) for s in day_sessions)
+        with column:
+            with st.container(border=True):
+                st.markdown(f"**{day.strftime('%a')}**")
+                st.caption(day.strftime('%b %d'))
+                if not day_sessions:
+                    st.caption("No sessions")
+                else:
+                    st.caption(f"{count_done} of {len(day_sessions)} done")
+                for number, sess in enumerate(day_sessions, start=1):
+                    task = task_lookup[sess['assignment_id']]
+                    title = html.escape(task['name'])
+                    if sess['completed']:
+                        st.markdown(f"<div style='color:#17613c;font-size:0.84rem'>✓ <s>{title}</s></div>", unsafe_allow_html=True)
+                        st.caption(f"Session {number} · {sess['hours']:g}h · Done")
+                    else:
+                        st.markdown(f"<div style='color:#17365D;font-size:0.84rem'>◯ {title}</div>", unsafe_allow_html=True)
+                        st.caption(f"Session {number} · {sess['hours']:g}h · To do")
+    st.markdown("#### Today's focus")
+    today_sessions = [sess for sess in valid_sessions if sess['day'] == date.today()]
+    if today_sessions:
+        for sess in today_sessions:
+            task = task_lookup[sess['assignment_id']]
+            left, right = st.columns([5, 2], vertical_alignment="center")
+            with left:
+                st.markdown(f"**{html.escape(task['name'])}**")
+                st.caption(f"{task['course']} · {sess['hours']:g} study hours · due {task['due'].strftime('%b %d')}")
+            with right:
+                new_value = st.checkbox("Completed", value=sess['completed'], key=f"study_session_{sess['id']}")
+                if new_value != sess['completed']:
+                    set_session_completed(sess['id'], new_value)
+                    st.rerun()
+    else:
+        st.info("No study sessions scheduled for today. Generate a plan or review your availability.")
+    with st.expander("Adjust an individual study session"):
+        adjustable = [s for s in valid_sessions if not s['completed']]
+        if adjustable:
+            options = {s['id']: f"{task_lookup[s['assignment_id']]['name']} · {s['day'].strftime('%a %b %d')} · {s['hours']:g}h" for s in adjustable}
+            chosen_id = st.selectbox("Study session", list(options), format_func=lambda sid: options[sid])
+            new_day = st.date_input("Move to", value=next(s['day'] for s in adjustable if s['id'] == chosen_id),
+                                    min_value=week_start, max_value=week_end)
+            if st.button("Move session"):
+                target = next(s for s in adjustable if s['id'] == chosen_id)
+                task = task_lookup[target['assignment_id']]
+                allocated = sum(s['hours'] for s in valid_sessions if s['day'] == new_day and s['id'] != chosen_id)
+                limit = availability.get(new_day.weekday(), 0.0)
+                if new_day >= task['due']:
+                    st.error("Choose a date before this assignment is due.")
+                elif allocated + target['hours'] > limit + 0.0001:
+                    st.error(f"That day only has {limit:g}h available, and this move would exceed it.")
+                else:
+                    move_session(chosen_id, new_day)
+                    st.rerun()
+        else:
+            st.caption("No unfinished sessions to move yet.")
 
 # ---------- SYLLABUS UPLOAD + AI REVIEW ----------
 st.divider()

@@ -66,3 +66,60 @@ def update_study_details(assignment_id, estimated_hours, confidence):
 if __name__ == "__main__":
     create_database()
     print("SyllabusSense database ready — existing assignments preserved.")
+
+
+# Version 6: schedule tables are separate; existing assignments are untouched.
+def create_schedule_tables():
+    with sqlite3.connect(DB_NAME) as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS day_availability (
+            weekday INTEGER PRIMARY KEY, hours REAL NOT NULL DEFAULT 0)""")
+        con.execute("""CREATE TABLE IF NOT EXISTS study_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assignment_id INTEGER NOT NULL,
+            session_date TEXT NOT NULL,
+            hours REAL NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (assignment_id) REFERENCES assignments(id))""")
+
+
+def get_availability():
+    with sqlite3.connect(DB_NAME) as con:
+        return dict(con.execute('SELECT weekday, hours FROM day_availability').fetchall())
+
+
+def save_availability(weekday_hours):
+    with sqlite3.connect(DB_NAME) as con:
+        for weekday, hours in weekday_hours.items():
+            con.execute('INSERT INTO day_availability (weekday,hours) VALUES (?,?) '
+                        'ON CONFLICT(weekday) DO UPDATE SET hours=excluded.hours',
+                        (int(weekday), float(hours)))
+
+
+def get_sessions(start, end):
+    with sqlite3.connect(DB_NAME) as con:
+        rows = con.execute('SELECT id,assignment_id,session_date,hours,completed FROM study_sessions '
+                           'WHERE session_date >= ? AND session_date <= ? ORDER BY session_date,id',
+                           (start.isoformat(), end.isoformat())).fetchall()
+    from datetime import date
+    return [{'id': r[0], 'assignment_id': r[1], 'day': date.fromisoformat(r[2]),
+             'hours': r[3], 'completed': bool(r[4])} for r in rows]
+
+
+def replace_unfinished_sessions(start, end, sessions):
+    """Preserve completed sessions; replace only uncompleted sessions for this week."""
+    with sqlite3.connect(DB_NAME) as con:
+        con.execute('DELETE FROM study_sessions WHERE completed=0 AND session_date >= ? AND session_date <= ?',
+                    (start.isoformat(), end.isoformat()))
+        con.executemany('INSERT INTO study_sessions (assignment_id,session_date,hours) VALUES (?,?,?)',
+                        [(s['assignment_id'], s['day'].isoformat(), s['hours']) for s in sessions])
+
+
+def set_session_completed(session_id, completed):
+    with sqlite3.connect(DB_NAME) as con:
+        con.execute('UPDATE study_sessions SET completed=? WHERE id=?', (int(completed), int(session_id)))
+
+
+def move_session(session_id, new_day):
+    with sqlite3.connect(DB_NAME) as con:
+        con.execute('UPDATE study_sessions SET session_date=? WHERE id=? AND completed=0',
+                    (new_day.isoformat(), int(session_id)))
