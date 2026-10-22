@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><style>
+body{font:14px system-ui,sans-serif;margin:0;background:transparent;color:#1c3554}button{border:1px solid #bacbe2;background:white;color:#17365d;border-radius:9px;padding:9px 13px;cursor:pointer;font-weight:600}button:disabled{opacity:.5}#status{font-size:12px;margin-left:8px;color:#526781}button.active{background:#b42318;color:white}
+</style></head><body>
+<button id="mic" type="button" aria-label="Dictate additional information">🎙 Speak clues</button><span id="status" role="status" aria-live="polite">Speech is only inserted for your review.</span>
+<script>
+const btn=document.getElementById('mic'), status=document.getElementById('status');
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let rec=null, listening=false;
+function send(type,data){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type},data||{}),'*')}
+function size(){send('streamlit:setFrameHeight',{height:55})}
+window.addEventListener('message',ev=>{if(ev.data&&ev.data.type==='streamlit:render')size()});
+send('streamlit:componentReady',{apiVersion:1});size();
+if(!SR){btn.disabled=true;status.textContent='Speech recognition is unavailable in this browser. Type your clues instead.'}
+else{
+ btn.onclick=()=>{
+  if(listening){rec.stop();return}
+  rec=new SR();rec.lang=document.documentElement.lang||'en-US';rec.continuous=false;rec.interimResults=false;
+  rec.onstart=()=>{listening=true;btn.classList.add('active');btn.textContent='■ Stop recording';status.textContent='Listening…'};
+  rec.onresult=e=>{const value=Array.from(e.results).map(r=>r[0].transcript).join(' ').trim();if(value){send('streamlit:setComponentValue',{value:{text:value,nonce:Date.now()}});status.textContent='Transcription added. Review before sending to AI.'}};
+  rec.onerror=e=>{status.textContent='Microphone unavailable ('+e.error+'). Type clues instead.'};
+  rec.onend=()=>{listening=false;btn.classList.remove('active');btn.textContent='🎙 Speak clues'};
+  try{rec.start()}catch(e){status.textContent='Could not start microphone. Use typing instead.'}
+ }
+}
+</script></body></html>

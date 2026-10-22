@@ -10,6 +10,8 @@ def _connect():
 def create_management_tables():
     with _connect() as con:
         con.execute("CREATE TABLE IF NOT EXISTS app_preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        con.execute("CREATE TABLE IF NOT EXISTS courses (name TEXT PRIMARY KEY COLLATE NOCASE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        con.execute("INSERT OR IGNORE INTO courses(name) SELECT DISTINCT course FROM assignments WHERE TRIM(course) != ''")
         con.execute("""CREATE TABLE IF NOT EXISTS uploaded_syllabi (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             filename TEXT NOT NULL,
@@ -18,6 +20,7 @@ def create_management_tables():
             imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(file_sha256, course)
         )""")
+        con.execute("INSERT OR IGNORE INTO courses(name) SELECT DISTINCT course FROM uploaded_syllabi WHERE TRIM(course) != ''")
         con.execute("""CREATE TABLE IF NOT EXISTS syllabus_assignments (
             syllabus_id INTEGER NOT NULL,
             assignment_id INTEGER NOT NULL UNIQUE,
@@ -41,10 +44,9 @@ def mark_onboarded():
 def register_syllabus(filename, file_hash, course, assignment_ids):
     """Track only *new* assignment IDs imported from the given PDF."""
     ids = sorted({int(a) for a in assignment_ids})
-    if not ids:
-        return
     create_management_tables()
     with _connect() as con:
+        con.execute("INSERT OR IGNORE INTO courses(name) VALUES(?)", (course,))
         con.execute("""INSERT OR IGNORE INTO uploaded_syllabi(filename,file_sha256,course)
                        VALUES(?,?,?)""", (filename, file_hash, course))
         row = con.execute("SELECT id FROM uploaded_syllabi WHERE file_sha256=? AND course=?", (file_hash, course)).fetchone()
@@ -103,8 +105,10 @@ def rename_course(old, new):
             file_hash = con.execute('SELECT file_sha256 FROM uploaded_syllabi WHERE id=?',(sid,)).fetchone()[0]
             if con.execute('SELECT 1 FROM uploaded_syllabi WHERE file_sha256=? AND course=? AND id<>?',(file_hash,new,sid)).fetchone():
                 raise ValueError('An imported syllabus already belongs to that course name.')
+        con.execute("INSERT OR IGNORE INTO courses(name) VALUES(?)", (new,))
         con.execute('UPDATE assignments SET course=? WHERE course=?',(new,old))
         con.execute('UPDATE uploaded_syllabi SET course=? WHERE course=?',(new,old))
+        con.execute("DELETE FROM courses WHERE name=?", (old,))
 
 
 def delete_assignment(assignment_id):
@@ -119,6 +123,7 @@ def delete_course(course):
         ids = [r[0] for r in con.execute('SELECT id FROM assignments WHERE course=?',(course,))]
         _delete_linked(con, ids)
         con.execute('DELETE FROM uploaded_syllabi WHERE course=?',(course,))
+        con.execute("DELETE FROM courses WHERE name=?", (course,))
 
 
 def delete_syllabus(syllabus_id):
@@ -132,3 +137,16 @@ def delete_syllabus(syllabus_id):
         _delete_linked(con, ids)
         con.execute('DELETE FROM syllabus_assignments WHERE syllabus_id=?',(sid,))
         con.execute('DELETE FROM uploaded_syllabi WHERE id=?',(sid,))
+
+
+def list_courses():
+    create_management_tables()
+    with _connect() as con:
+        return [row[0] for row in con.execute("SELECT name FROM courses ORDER BY name COLLATE NOCASE")]
+
+def register_course(name):
+    if not name or not name.strip():
+        raise ValueError("Course name cannot be empty")
+    create_management_tables()
+    with _connect() as con:
+        con.execute("INSERT OR IGNORE INTO courses(name) VALUES(?)", (name.strip(),))

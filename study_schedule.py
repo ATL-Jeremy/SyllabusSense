@@ -1,5 +1,5 @@
 """Deterministic study scheduling with deadline-aware, balanced allocation."""
-from datetime import timedelta
+from datetime import date, timedelta
 
 DEFAULT_ESTIMATE_HOURS = 3.0
 EPS = 1e-8
@@ -27,7 +27,9 @@ def generate_week(tasks, capacities, start, priority_fn, session_length=1.0, pre
     assumed = []
     eligible = {}
     for task in tasks:
-        if task['completed']:
+        if task['completed'] or not isinstance(task.get('due'), date):
+            # Undated assignments are retained in the database but are not
+            # eligible for deadline-based planning or shortage calculations.
             continue
         hours = task['hours']
         if hours is None:

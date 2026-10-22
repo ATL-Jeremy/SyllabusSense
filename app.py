@@ -5,6 +5,10 @@ import re
 import hashlib
 import html
 import pandas as pd
+from pathlib import Path
+import streamlit.components.v1 as components
+
+voice_clues = components.declare_component("syllabussense_voice_clues", path=str(Path(__file__).resolve().parent / "voice_input"))
 from ai_analysis import analyze_syllabus, MAX_CHARACTERS
 from database import (
     create_database,
@@ -19,11 +23,12 @@ from database import (
     start_focus, set_focus_running, finish_focus,
 )
 from study_schedule import generate_week
+from study_calendar import render_calendar
 from focus_discard import discard_active_focus, delete_saved_focus
 from date_estimates import suggest_missing_dates, record_date_labels, get_date_labels
 from course_management import (is_onboarded, mark_onboarded, rename_course, delete_course,
                                delete_assignment, create_management_tables, register_syllabus,
-                               list_syllabi, delete_syllabus)
+                               list_syllabi, delete_syllabus, list_courses, register_course)
 
 def parse_weight(raw):
     """Convert '10%' or '45% (15% each)' to a numeric total weight.
@@ -183,6 +188,48 @@ hr{border-color:#DFE7F2 !important;}
 [role="listbox"] [role="option"]:hover {background-color:#EAF1FC !important;}
 
 
+/* Version 7.13.2: calendar and upload/tooltip contrast */
+[data-testid="stFileUploaderFile"] *, [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] * {color:#F7FAFF !important;-webkit-text-fill-color:#F7FAFF !important;}
+[data-testid="stFileUploaderFile"] {background:#263750 !important;border-radius:9px !important;}
+[data-testid="stTooltipContent"],div[role="tooltip"],div[role="tooltip"] * {background:#FFFFFF !important;color:#142D4A !important;-webkit-text-fill-color:#142D4A !important;}
+.study-cal-event{background:#E1ECFB;border-left:3px solid #3569AA;border-radius:6px;padding:5px;margin:3px 0; font-size:11px;color:#12365D;overflow-wrap:anywhere;}
+.study-cal-event.is-done{background:#DAF3E5;border-left-color:#23825A;color:#20543A;}
+.study-cal-empty{min-height:36px;}
+/* Version 7.13.2 uploader contrast hotfix: render uploaded file chip in light mode. */
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"],
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] > div,
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] > div > div {
+  background-color:#EEF4FB !important;
+  color:#172E54 !important;
+  color-scheme:light !important;
+  border-radius:9px !important;
+}
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] span,
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] p,
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] small,
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] [data-testid="stMarkdownContainer"] *,
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] [data-testid="stFileUploaderFileName"],
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] [data-testid="stFileUploaderFileSize"] {
+  color:#172E54 !important;
+  -webkit-text-fill-color:#172E54 !important;
+  opacity:1 !important;
+}
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] svg {
+  color:#285A98 !important;
+  fill:currentColor !important;
+}
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] button {
+  background-color:#FFFFFF !important;
+  border-radius:50% !important;
+  color:#172E54 !important;
+}
+
+/* Version 7.13.3: force readable file details on the actual dark file chip. */
+.stApp [data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] :is(span,p,small,div) {
+  color:#FFFFFF !important; -webkit-text-fill-color:#FFFFFF !important;
+}
+/* Explicit selected-PDF label below the widget remains readable even if
+   Streamlit changes its internal chip markup. */
 /* Version 7.13: dialog controls, premium sidebar, accessible contrast */
 [data-testid="stDialog"] [role="dialog"], div[role="dialog"] {
   background:#FFFFFF !important; color:#182C44 !important; color-scheme:light !important;
@@ -316,21 +363,63 @@ if not tasks and not is_onboarded():
 show_simulation = st.session_state.get("show_dev_simulation", False)
 if show_simulation:
     main_pages.append("Simulation Lab")
+if st.session_state.get("show_voice_input_test", False):
+    main_pages.append("Voice Input Test")
 if st.session_state.get("main_navigation") not in main_pages:
     st.session_state["main_navigation"] = "Welcome" if "Welcome" in main_pages else "Dashboard"
-sidebar_icons = {"Welcome": "✨", "Dashboard": "▦", "My Courses": "▤", "Syllabus Upload": "↥", "Study Planner": "▦", "Focus Mode": "◷", "Simulation Lab": "⚙"}
+sidebar_icons = {"Welcome": "✨", "Dashboard": "▦", "My Courses": "▤", "Syllabus Upload": "↥", "Study Planner": "▦", "Focus Mode": "◷", "Simulation Lab": "⚙", "Voice Input Test": "🎙"}
 st.sidebar.markdown("<div class='nav-section'>WORKSPACE</div>", unsafe_allow_html=True)
 page = st.sidebar.radio("Navigate", main_pages, key="main_navigation",
                         format_func=lambda name: f"{sidebar_icons.get(name, '•')}   {name}", label_visibility="collapsed")
 with st.sidebar.expander("Developer tools", expanded=False):
     st.checkbox("Show Simulation Lab", key="show_dev_simulation", help="Fictional experiments for testing only.")
+    st.checkbox("Show Voice Input Test", key="show_voice_input_test", help="Test browser microphone without a syllabus or Gemini API requests.")
 st.sidebar.divider()
 st.sidebar.markdown("<div class='nav-footer'>✦ &nbsp; One study session at a time.</div>", unsafe_allow_html=True)
-st.sidebar.caption("Version 7.13 · Local, private study data.")
+st.sidebar.caption("Version 7.13.3 · Local, private study data.")
 
 def enter_from_welcome(destination):
     mark_onboarded()
     st.session_state["main_navigation"] = destination
+
+if page == "Voice Input Test":
+    st.markdown('<div class="hero"><h2>Voice Input Test</h2><p>Check microphone input without uploading a syllabus.</p></div>', unsafe_allow_html=True)
+    st.info("This test does not call Gemini or use your Gemini API quota. Browser speech recognition may still require your browser's own online service.")
+    st.subheader("1. Browser dictation")
+    st.caption("Click Speak clues and say a sentence. If it works, the words will appear below. If it does nothing, the browser may be blocking microphone access inside an embedded component.")
+    voice_result = voice_clues(key="developer_voice_test", default=None)
+    if isinstance(voice_result, dict) and voice_result.get("text"):
+        if voice_result.get("nonce") != st.session_state.get("developer_voice_nonce"):
+            st.session_state["developer_voice_nonce"] = voice_result.get("nonce")
+            st.session_state["developer_voice_text"] = (st.session_state.get("developer_voice_text", "") + " " + voice_result["text"]).strip()[:2000]
+    st.text_area("Dictated words (editable)", key="developer_voice_text", height=110,
+                 help="You can also type here. This test will not submit your text to AI.")
+    st.divider()
+    st.subheader("2. Microphone recording (no AI)")
+    st.caption("This separate recorder tests microphone access without sending audio to Gemini. It will play back your recording but cannot transcribe it without an additional transcription service.")
+    test_recording = st.audio_input("Record a short audio sample", key="developer_voice_audio")
+    if test_recording is not None:
+        st.success("Microphone recording captured. Play it below to verify audio.")
+        st.audio(test_recording)
+    st.caption("Recording and playback do not call Gemini. The audio is held temporarily in this Streamlit session, not saved to your assignments database.")
+    st.markdown("#### Optional: Transcribe the recording with Gemini")
+    st.caption("Only clicking the button below sends this audio to Google Gemini for transcription. Google may enforce API quotas. You can use the recorder and type your clues even when Gemini is unavailable.")
+    if st.button("Transcribe my recording with Gemini", key="developer_voice_transcribe", disabled=test_recording is None):
+        try:
+            from gemini_voice_fallback import transcribe_audio
+            with st.spinner("Transcribing your audio..."):
+                transcript = transcribe_audio(test_recording.getvalue(), st.secrets["GEMINI_API_KEY"])
+            st.session_state["developer_voice_pending"] = transcript
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Transcription unavailable: {str(exc)[:260]}")
+    pending_voice = st.session_state.pop("developer_voice_pending", None)
+    if pending_voice:
+        prior_voice = st.session_state.get("developer_transcribed_text", "")
+        st.session_state["developer_transcribed_text"] = (prior_voice + " " + pending_voice).strip()[:2000]
+    st.text_area("Gemini transcription (editable)", key="developer_transcribed_text", height=110,
+                 help="Review the text before copying it into your actual syllabus clues. Nothing here triggers date suggestions.")
+    st.caption("This test never saves the transcript to the database or submits it for date suggestions.")
 
 if page == "Welcome":
     st.markdown('<div class="hero"><h2>Welcome to SyllabusSense</h2><p>Your semester, made simpler.</p></div>', unsafe_allow_html=True)
@@ -538,7 +627,7 @@ if page == "My Courses":
     st.markdown('<div class="hero"><h2>My Courses</h2><p>Organize your classes and clean up your study workspace.</p></div>', unsafe_allow_html=True)
     st.title("Courses & syllabi")
     st.caption("Deleting a course removes its assignments and linked calendar / focus records. Back up your database first.")
-    course_names = sorted({t['course'] for t in tasks} | {item[2] for item in list_syllabi()}, key=str.casefold)
+    course_names = list_courses()
     if course_names:
         st.subheader("Your courses")
         chosen_course = st.selectbox("Choose a course", course_names, key="manage_course_picker")
@@ -742,6 +831,7 @@ if page == "Study Planner":
                 st.error("Please enter a course name.")
             else:
                 add_assignment(task_name.strip(), course.strip(), due_date.isoformat(), priority)
+                register_course(course.strip())
                 st.success("Assignment added!")
                 st.rerun()
 
@@ -858,38 +948,8 @@ if page == "Study Planner":
         current_sessions = get_sessions(week_start, week_end)
         task_lookup = {t['id']: t for t in tasks}
         valid_sessions = [s for s in current_sessions if s['assignment_id'] in task_lookup]
-        st.markdown("#### Your next seven days")
-        st.caption("A saved Focus Mode session started from a calendar block marks that block complete. Assignments remain separate.")
-        for offset in range(7):
-            if offset % 2 == 0:
-                calendar_pair = st.columns(2, gap="medium")
-            column = calendar_pair[offset % 2]
-            day = week_start + timedelta(days=offset)
-            day_sessions = [s for s in valid_sessions if s['day'] == day]
-            count_done = sum(bool(s['completed']) for s in day_sessions)
-            with column:
-                with st.container(border=True):
-                    st.markdown(f"**{day.strftime('%a')}**")
-                    st.caption(day.strftime('%b %d'))
-                    if not day_sessions:
-                        st.caption("No sessions")
-                    else:
-                        st.caption(f"{count_done} of {len(day_sessions)} done")
-                    for number, sess in enumerate(day_sessions, start=1):
-                        task = task_lookup[sess['assignment_id']]
-                        title = html.escape(task['name'])
-                        if sess['completed']:
-                            st.markdown(f"<div style='color:#17613c;font-size:0.84rem'>✓ <s>{title}</s></div>", unsafe_allow_html=True)
-                            st.caption(f"Session {number} · {sess['hours']:g}h · Done")
-                        else:
-                            st.markdown(f"<div style='color:#17365D;font-size:0.84rem'>◯ {title}</div>", unsafe_allow_html=True)
-                            st.caption(f"Session {number} · {sess['hours']:g}h · To do")
-                            st.button(
-                                "Open running timer" if get_active_focus() is not None else "Start focus",
-                                key=f"calendar_focus_{sess['id']}", use_container_width=True,
-                                on_click=open_calendar_focus,
-                                args=(sess['assignment_id'], sess['hours'], sess['id']),
-                            )
+        st.markdown("#### Study Calendar")
+        render_calendar(task_lookup, open_calendar_focus, get_active_focus() is not None)
         with st.expander("Adjust an individual study session"):
             adjustable = [s for s in valid_sessions if not s['completed']]
             if adjustable:
@@ -1205,6 +1265,7 @@ if page == "Syllabus Upload":
         uploaded_file = st.file_uploader("PDF file", type=["pdf"], label_visibility="collapsed")
 
     if uploaded_file is not None:
+        st.markdown(f"**Selected PDF:** {html.escape(uploaded_file.name)} · {uploaded_file.size / 1024:.1f} KB")
         file_bytes = uploaded_file.getvalue()
         file_id = hashlib.sha256(file_bytes).hexdigest()
 
@@ -1302,9 +1363,40 @@ if page == "Syllabus Upload":
                         term_start = st.date_input("Semester start date (verify from school calendar)", value=None, key=f"term_start_{file_id}")
                     with dates_b:
                         term_end = st.date_input("Semester end date (verify from school calendar)", value=None, key=f"term_end_{file_id}")
+                    context_key = f"date_context_{file_id}"
+                    previous_voice_key = f"last_voice_clue_{file_id}"
+                    last_dictation_data = st.session_state.get(f"voice_return_{file_id}")
+                    last_dictation = last_dictation_data.get("text", "") if isinstance(last_dictation_data, dict) else ""
+                    dictation_id = last_dictation_data.get("nonce") if isinstance(last_dictation_data, dict) else None
+                    if last_dictation and dictation_id != st.session_state.get(previous_voice_key):
+                        prior = st.session_state.get(context_key, "")
+                        st.session_state[context_key] = (prior + " " + last_dictation).strip()[:2000]
+                        st.session_state[previous_voice_key] = dictation_id
+                    pending_transcript_key = f"voice_pending_transcript_{file_id}"
+                    pending_transcript = st.session_state.pop(pending_transcript_key, None)
+                    if pending_transcript:
+                        old_clue = st.session_state.get(context_key, "")
+                        st.session_state[context_key] = (old_clue + " " + pending_transcript).strip()[:2000]
                     student_context = st.text_area("Additional information for AI (optional)",
                         placeholder="Example: Professor said our first essay is due around mid-November.",
-                        key=f"date_context_{file_id}", max_chars=2000)
+                        key=context_key, max_chars=2000)
+                    st.caption("Browser dictation stays in your browser when supported. Gemini fallback sends audio only after you click Transcribe recording. Review text before suggesting dates.")
+                    voice_text = voice_clues(key=f"voice_clues_{file_id}", default=None)
+                    if isinstance(voice_text, dict) and voice_text.get("text") and voice_text.get("nonce") != st.session_state.get(previous_voice_key):
+                        st.session_state[f"voice_return_{file_id}"] = voice_text
+                        st.rerun()
+                    with st.expander("Browser microphone not working? Record with Gemini (optional)", expanded=False):
+                        st.caption("The audio is sent to Google's Gemini service only if you click Transcribe recording. Audio is not stored by SyllabusSense. You can always type instead.")
+                        recording = st.audio_input("Record a short voice clue", key=f"voice_fallback_audio_{file_id}")
+                        if st.button("Transcribe recording with Gemini", key=f"voice_transcribe_{file_id}", disabled=recording is None):
+                            try:
+                                from gemini_voice_fallback import transcribe_audio
+                                with st.spinner("Transcribing recording..."):
+                                    transcript = transcribe_audio(recording.getvalue(), st.secrets["GEMINI_API_KEY"])
+                                st.session_state[pending_transcript_key] = transcript
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Could not transcribe audio: {str(exc)[:220]}")
                     if st.button("Suggest missing dates with AI", key=f"suggest_missing_{file_id}"):
                         if not term_start or not term_end:
                             st.error("Enter the actual semester start and end dates before requesting suggestions.")
@@ -1318,7 +1410,7 @@ if page == "Syllabus Upload":
                                 st.session_state[f"date_suggestion_checked_{file_id}"] = True
                             except Exception as exc:
                                 st.session_state[f"date_suggestion_checked_{file_id}"] = False
-                                st.error(f"Gemini couldn't complete this request ({type(exc).__name__}). Please try again later; no dates were changed.")
+                                st.error(f"Date suggestions are unavailable: {str(exc)[:260]}. Your assessments were not changed.")
                     suggestions = st.session_state.get(f"date_suggestions_{file_id}", {})
                     if st.session_state.get(f"date_suggestion_checked_{file_id}") and not suggestions:
                         st.info("No defensible calendar dates could be inferred. That's expected when a syllabus has no timing clues. Add specific instructor information above, or set your own Planning target. No dates have been changed.")
@@ -1458,6 +1550,7 @@ if page == "Syllabus Upload":
                                 duplicates += 1
                                 continue
                             add_assignment(name, course_name.strip(), due, priority, weight)
+                            register_course(course_name.strip())
                             existing.add(identity)
                             matching_ids = [t['id'] for t in load_tasks() if
                                 (t['name'].casefold(), t['course'].casefold(), t['due'].isoformat() if t['due'] else '') == identity]
@@ -1468,8 +1561,8 @@ if page == "Syllabus Upload":
                                 if matching_ids:
                                     record_date_labels(matching_ids[-1], date_status)
                             saved += 1
-                        if new_assignment_ids:
-                            register_syllabus(uploaded_file.name, file_id, course_name.strip(), new_assignment_ids)
+                        register_course(course_name.strip())
+                        register_syllabus(uploaded_file.name, file_id, course_name.strip(), new_assignment_ids)
                         st.success(f"Saved {saved} assignment(s); skipped {duplicates} duplicate(s).")
                         if saved:
                             st.info("Open Dashboard to see your saved assignments.")
