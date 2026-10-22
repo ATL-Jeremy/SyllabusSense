@@ -97,7 +97,19 @@ The app creates or updates its local SQLite database as needed. Uploaded documen
 
 ## Screenshots
 
-Screenshots of the dashboard, study planner, and Focus Mode will be added after the next UI review. No private student data or API keys will be included.
+The screenshots below are genuine captures of the local Streamlit prototype during development (from different test sessions). They are not AI-generated product mockups; screen details may differ slightly between versions.
+
+### Dashboard
+
+![SyllabusSense Dashboard](screenshots/dashboard.png)
+
+### Weekly Study Planner
+
+![SyllabusSense weekly Study Planner](screenshots/study-planner.png)
+
+### Focus Mode
+
+![SyllabusSense Focus Mode](screenshots/focus-mode.png)
 
 ## Project purpose
 
