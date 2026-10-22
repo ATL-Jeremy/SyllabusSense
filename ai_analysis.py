@@ -7,10 +7,8 @@ Do not place API keys in this source file.
 import json
 from datetime import date
 
-from google import genai
-from google.genai import types
+from gemini_reliability import generate_json
 
-MODEL = "gemini-3.8-flash"  # Confirmed working in the user's Gemini test.
 MAX_CHARACTERS = 30000
 
 
@@ -47,26 +45,9 @@ Rules:
 
 SYLLABUS TEXT:\n{syllabus_text[:MAX_CHARACTERS]}"""
 
-    client = genai.Client(
-        api_key=api_key,
-        http_options=types.HttpOptions(timeout=30000),
-    )
-    try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0,
-            ),
-        )
-    finally:
-        client.close()
+    response_text = generate_json(prompt, api_key)
 
-    if not response.text:
-        raise ValueError("Gemini returned no readable response. Please try again.")
-
-    data = json.loads(response.text)
+    data = json.loads(response_text)
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         raise ValueError("Gemini returned an unexpected result format.")
 
